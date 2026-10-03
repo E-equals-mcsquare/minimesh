@@ -25,11 +25,17 @@ spec:
               value: "admin"
             - name: GF_INSTALL_PLUGINS
               value: ""
+            - name: GF_PATHS_PROVISIONING
+              value: /etc/grafana/provisioning
           volumeMounts:
             - name: storage
               mountPath: /var/lib/grafana
             - name: datasources
               mountPath: /etc/grafana/provisioning/datasources
+            - name: dashboards-provider
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: dashboard-minimesh
+              mountPath: /var/lib/grafana/dashboards
           resources:
             requests:
               memory: "256Mi"
@@ -43,6 +49,12 @@ spec:
         - name: datasources
           configMap:
             name: grafana-datasources
+        - name: dashboards-provider
+          configMap:
+            name: grafana-dashboard-provider
+        - name: dashboard-minimesh
+          configMap:
+            name: grafana-dashboard-minimesh
 
 ---
 apiVersion: v1

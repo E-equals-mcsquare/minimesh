@@ -1,4 +1,4 @@
-.PHONY: help build build-l4 build-control-plane build-data-plane build-api-gateway run-user run-order run-payment run-all run-nginx stop-nginx run-l4 stop-l4 run-control-plane stop-control-plane run-data-plane stop-data-plane run-api-gateway stop-api-gateway test-user test-order test-payment test-all test-nginx test-l4 test-control-plane test-data-plane test-api-gateway run-all-with-proxy run-all-l4-l7 run-all-control-data run-all-api-gateway logs-nginx k8s-deploy k8s-build-images k8s-cluster-create k8s-deploy-only k8s-status k8s-test k8s-clean monitoring-install monitoring-clean argocd-install argocd-clean argocd-reinstall argocd-create-app clean
+.PHONY: help build build-l4 build-control-plane build-data-plane build-api-gateway run-user run-order run-payment run-all run-nginx stop-nginx run-l4 stop-l4 run-control-plane stop-control-plane run-data-plane stop-data-plane run-api-gateway stop-api-gateway test-user test-order test-payment test-all test-nginx test-l4 test-control-plane test-data-plane test-api-gateway run-all-with-proxy run-all-l4-l7 run-all-control-data run-all-api-gateway logs-nginx k8s-deploy k8s-build-images k8s-cluster-create k8s-deploy-only k8s-status k8s-test k8s-clean monitoring-install monitoring-clean kube-state-metrics-install grafana-dashboard-install ingress-install ingress-test ingress-clean argocd-install argocd-clean argocd-reinstall argocd-create-app clean
 
 help:
 	@echo "MiniMesh - Networking Lab"
@@ -50,8 +50,15 @@ help:
 	@echo "  make k8s-clean              - Delete kind cluster"
 	@echo ""
 	@echo "Observability (Monitoring):"
-	@echo "  make monitoring-install     - Install Prometheus + Grafana"
-	@echo "  make monitoring-clean       - Remove Prometheus + Grafana"
+	@echo "  make monitoring-install           - Install Prometheus + Grafana"
+	@echo "  make kube-state-metrics-install   - Install kube-state-metrics (Kubernetes metrics)"
+	@echo "  make grafana-dashboard-install    - Install MiniMesh Grafana Dashboard"
+	@echo "  make monitoring-clean             - Remove Prometheus + Grafana"
+	@echo ""
+	@echo "Kubernetes Ingress:"
+	@echo "  make ingress-install        - Install ingress-nginx + MiniMesh Ingress rules"
+	@echo "  make ingress-test           - Test Ingress routing (/api/users, /api/orders, /api/payments)"
+	@echo "  make ingress-clean          - Remove Ingress resources + controller"
 	@echo ""
 	@echo "GitOps (ArgoCD):"
 	@echo "  make argocd-install         - Install ArgoCD"
@@ -471,10 +478,88 @@ monitoring-install:
 	@echo ""
 	@echo "Grafana is already configured to use Prometheus as a data source."
 
+grafana-dashboard-install:
+	@echo "📊 Installing MiniMesh Grafana Dashboard..."
+	@kubectl apply -f k8s/monitoring/grafana-dashboard-configmap.yaml
+	@echo ""
+	@echo "⏳ Restarting Grafana pod to load dashboard..."
+	@kubectl rollout restart deployment/grafana -n monitoring
+	@kubectl wait --for=condition=ready pod -l app=grafana -n monitoring --timeout=60s 2>/dev/null || true
+	@echo ""
+	@echo "✅ Dashboard installed!"
+	@echo ""
+	@echo "View dashboard:"
+	@echo "  kubectl port-forward -n monitoring svc/grafana 3000:3000"
+	@echo "  Open: http://localhost:3000"
+	@echo "  Login: admin / admin"
+	@echo "  Dashboard: MiniMesh Platform Engineering Lab"
+
+kube-state-metrics-install:
+	@echo "📊 Installing kube-state-metrics..."
+	@helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+	@helm repo update
+	@helm install kube-state-metrics prometheus-community/kube-state-metrics -n monitoring --wait
+	@echo ""
+	@echo "⏳ Waiting for kube-state-metrics to be ready..."
+	@kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=kube-state-metrics -n monitoring --timeout=60s 2>/dev/null || true
+	@echo ""
+	@echo "✅ kube-state-metrics installed!"
+	@echo ""
+	@echo "Prometheus will now have access to Kubernetes metrics:"
+	@echo "  - kube_pod_info"
+	@echo "  - kube_pod_status_phase"
+	@echo "  - kube_deployment_status_replicas"
+	@echo "  - container_memory_usage_bytes"
+	@echo "  - container_cpu_usage_seconds_total"
+
 monitoring-clean:
 	@echo "🗑️  Removing Prometheus + Grafana..."
 	@kubectl delete namespace monitoring --ignore-not-found=true
 	@echo "✅ Monitoring stack removed"
+
+ingress-install:
+	@echo "🌐 Labeling control-plane node as ingress-ready..."
+	@kubectl label node minimesh-control-plane ingress-ready=true --overwrite
+	@echo ""
+	@echo "🌐 Installing ingress-nginx controller..."
+	@kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+	@echo ""
+	@echo "⏳ Waiting for ingress-nginx controller to be ready..."
+	@kubectl wait --namespace ingress-nginx --for=condition=ready pod --selector=app.kubernetes.io/component=controller --timeout=120s
+	@echo ""
+	@echo "🌐 Applying MiniMesh Ingress rules..."
+	@kubectl apply -f k8s/ingress/ingress.yaml
+	@echo ""
+	@echo "✅ Ingress installed!"
+	@echo ""
+	@echo "Test it:"
+	@echo "  curl http://localhost/api/users/123"
+	@echo "  curl http://localhost/api/orders/123"
+	@echo "  curl -X POST http://localhost/api/payments -d '{\"order_id\":\"123\",\"amount\":99.99}'"
+
+ingress-test:
+	@echo "🧪 Testing Ingress routing..."
+	@echo ""
+	@echo "GET /api/users/123:"
+	@curl -s http://localhost/api/users/123
+	@echo ""
+	@echo ""
+	@echo "GET /api/orders/123:"
+	@curl -s http://localhost/api/orders/123
+	@echo ""
+	@echo ""
+	@echo "POST /api/payments:"
+	@curl -s -X POST http://localhost/api/payments -H "Content-Type: application/json" -d '{"order_id":"123","amount":99.99}'
+	@echo ""
+	@echo ""
+	@echo "GET /orders/123 (no /api prefix — expect 404 from nginx):"
+	@curl -s -w "\nHTTP Status: %{http_code}\n" http://localhost/orders/123
+
+ingress-clean:
+	@echo "🗑️  Removing Ingress resources..."
+	@kubectl delete -f k8s/ingress/ingress.yaml --ignore-not-found=true
+	@kubectl delete -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml --ignore-not-found=true
+	@echo "✅ Ingress removed"
 
 argocd-install:
 	@echo "🚀 Installing ArgoCD..."
