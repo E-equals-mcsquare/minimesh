@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  user-service:
+    build:
+      context: ./services/user-service
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      - SERVICE_NAME=user-service
+      - SERVICE_PORT=8001
+    networks:
+      - minimesh
+
+  order-service:
+    build:
+      context: ./services/order-service
+      dockerfile: Dockerfile
+    ports:
+      - "8002:8002"
+    environment:
+      - SERVICE_NAME=order-service
+      - SERVICE_PORT=8002
+    networks:
+      - minimesh
+
+  payment-service:
+    build:
+      context: ./services/payment-service
+      dockerfile: Dockerfile
+    ports:
+      - "8003:8003"
+    environment:
+      - SERVICE_NAME=payment-service
+      - SERVICE_PORT=8003
+    networks:
+      - minimesh
+
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    ports:
+      - "9999:9999"
+    environment:
+      - SERVICE_NAME=api-gateway
+    depends_on:
+      - user-service
+      - order-service
+      - payment-service
+    networks:
+      - minimesh
+
+networks:
+  minimesh:
+    driver: bridge

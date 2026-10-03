@@ -1,0 +1,20 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: minimesh-services
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/E-equals-mcsquare/minimesh
+    targetRevision: HEAD
+    path: k8s/services
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+    - CreateNamespace=true
