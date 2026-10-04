@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 )
@@ -75,6 +76,13 @@ func paymentsHandler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		logRequest(r.Method, r.URL.Path, http.StatusBadRequest, time.Since(start))
 		return
+	}
+
+	// Debug knob for the Envoy timeout experiment: ?delay=<seconds> sleeps
+	// before responding so callers can observe the sidecar's route timeout.
+	if delaySec, err := strconv.Atoi(r.URL.Query().Get("delay")); err == nil && delaySec > 0 {
+		log.Printf("[%s] simulating %ds delay before responding\n", serviceName, delaySec)
+		time.Sleep(time.Duration(delaySec) * time.Second)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

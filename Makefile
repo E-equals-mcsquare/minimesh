@@ -1,4 +1,4 @@
-.PHONY: help build build-l4 build-control-plane build-data-plane build-api-gateway run-user run-order run-payment run-all run-nginx stop-nginx run-l4 stop-l4 run-control-plane stop-control-plane run-data-plane stop-data-plane run-api-gateway stop-api-gateway test-user test-order test-payment test-all test-nginx test-l4 test-control-plane test-data-plane test-api-gateway run-all-with-proxy run-all-l4-l7 run-all-control-data run-all-api-gateway logs-nginx k8s-deploy k8s-build-images k8s-cluster-create k8s-deploy-only k8s-status k8s-test k8s-clean monitoring-install monitoring-clean kube-state-metrics-install grafana-dashboard-install ingress-install ingress-test ingress-clean argocd-install argocd-clean argocd-reinstall argocd-create-app clean
+.PHONY: help build build-l4 build-control-plane build-data-plane build-api-gateway run-user run-order run-payment run-all run-nginx stop-nginx run-l4 stop-l4 run-control-plane stop-control-plane run-data-plane stop-data-plane run-api-gateway stop-api-gateway test-user test-order test-payment test-all test-nginx test-l4 test-control-plane test-data-plane test-api-gateway run-all-with-proxy run-all-l4-l7 run-all-control-data run-all-api-gateway logs-nginx k8s-deploy k8s-build-images k8s-cluster-create k8s-deploy-only k8s-status k8s-test k8s-clean monitoring-install monitoring-clean kube-state-metrics-install grafana-dashboard-install ingress-install ingress-test ingress-clean envoy-install envoy-test envoy-break envoy-restore envoy-admin argocd-install argocd-clean argocd-reinstall argocd-create-app clean
 
 help:
 	@echo "MiniMesh - Networking Lab"
@@ -59,6 +59,13 @@ help:
 	@echo "  make ingress-install        - Install ingress-nginx + MiniMesh Ingress rules"
 	@echo "  make ingress-test           - Test Ingress routing (/api/users, /api/orders, /api/payments)"
 	@echo "  make ingress-clean          - Remove Ingress resources + controller"
+	@echo ""
+	@echo "Envoy Sidecar (order-service -> payment-service):"
+	@echo "  make envoy-install          - Install Envoy sidecar on order-service"
+	@echo "  make envoy-test             - Test proxying + the timeout experiment"
+	@echo "  make envoy-break            - Scale payment-service to 0 (retry experiment)"
+	@echo "  make envoy-restore          - Restore payment-service replicas"
+	@echo "  make envoy-admin            - Port-forward Envoy's admin interface"
 	@echo ""
 	@echo "GitOps (ArgoCD):"
 	@echo "  make argocd-install         - Install ArgoCD"
@@ -560,6 +567,79 @@ ingress-clean:
 	@kubectl delete -f k8s/ingress/ingress.yaml --ignore-not-found=true
 	@kubectl delete -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml --ignore-not-found=true
 	@echo "✅ Ingress removed"
+
+envoy-install:
+	@echo "🔀 Applying Envoy sidecar config..."
+	@kubectl create configmap envoy-sidecar-config --from-file=envoy.yaml=k8s/envoy/envoy.yaml --dry-run=client -o yaml | kubectl apply -f -
+	@echo ""
+	@echo "🐳 Rebuilding order-service and payment-service images..."
+	@docker build -t order-service:latest ./services/order-service
+	@docker build -t payment-service:latest ./services/payment-service
+	@kind load docker-image order-service:latest --name minimesh
+	@kind load docker-image payment-service:latest --name minimesh
+	@echo ""
+	@echo "📥 Applying order-service deployment (adds the Envoy sidecar container)..."
+	@kubectl apply -f k8s/services/order-service-deployment.yaml
+	@kubectl rollout restart deployment/payment-service
+	@kubectl rollout status deployment/order-service --timeout=90s
+	@kubectl rollout status deployment/payment-service --timeout=60s
+	@echo ""
+	@echo "✅ Envoy sidecar installed!"
+	@echo ""
+	@echo "⚠️  If the ArgoCD minimesh-services Application has auto-sync enabled, it will"
+	@echo "    revert this change back to whatever is in the Git repo. Disable it first:"
+	@echo "    kubectl patch application minimesh-services -n argocd --type=merge -p '{\"spec\":{\"syncPolicy\":null}}'"
+	@echo ""
+	@echo "Test it: make envoy-test"
+
+envoy-test:
+	@echo "🧪 Testing Envoy sidecar proxying..."
+	@echo ""
+	@echo "GET /api/orders/123 (normal path: client -> Ingress -> order-service -> Envoy -> payment-service):"
+	@curl -s http://localhost/api/orders/123
+	@echo ""
+	@echo ""
+	@echo "Envoy access log for that request:"
+	@sleep 1
+	@kubectl logs -l app=order-service -c envoy-sidecar --tail=50 --prefix | grep "\[envoy\]" | grep -v "delay=" | tail -1
+	@echo ""
+	@echo "--- Timeout experiment (payment-service sleeps 3s; Envoy's route timeout is 2s) ---"
+	@curl -s "http://localhost/api/orders/456?simulate_delay=3"
+	@echo ""
+	@sleep 1
+	@kubectl logs -l app=order-service -c envoy-sidecar --tail=50 --prefix | grep "\[envoy\]" | grep "delay=" | tail -1
+	@echo ""
+	@echo "(watch for status=504, duration_ms=~2000, retries=UT -- Envoy's timeout fired, not payment-service's 3s sleep)"
+	@echo ""
+	@echo "--- Retry / connection-failure experiment: make envoy-break, then make envoy-restore ---"
+
+envoy-break:
+	@echo "💥 Scaling payment-service to 0 replicas (simulates a total outage)..."
+	@kubectl scale deployment payment-service --replicas=0
+	@sleep 3
+	@echo ""
+	@echo "GET /api/orders/999 (Envoy will retry, then give up):"
+	@curl -s http://localhost/api/orders/999
+	@echo ""
+	@echo ""
+	@echo "Envoy access log (watch for retries=URX,UF -- retries exhausted, upstream connect failure):"
+	@sleep 1
+	@kubectl logs -l app=order-service -c envoy-sidecar --tail=50 --prefix | grep "\[envoy\]" | grep "status=503" | tail -1
+	@echo ""
+	@echo "Restore with: make envoy-restore"
+
+envoy-restore:
+	@echo "🔧 Restoring payment-service to 2 replicas..."
+	@kubectl scale deployment payment-service --replicas=2
+	@kubectl rollout status deployment/payment-service --timeout=60s
+	@echo "✅ Restored"
+
+envoy-admin:
+	@echo "📊 Port-forwarding Envoy admin interface on one order-service pod..."
+	@POD=$$(kubectl get pod -l app=order-service -o jsonpath='{.items[0].metadata.name}'); \
+	echo "Forwarding $$POD:9901 -> localhost:9901"; \
+	echo "Open http://localhost:9901/clusters (upstream health) or /stats once forwarded"; \
+	kubectl port-forward pod/$$POD 9901:9901
 
 argocd-install:
 	@echo "🚀 Installing ArgoCD..."

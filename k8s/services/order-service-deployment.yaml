@@ -29,6 +29,10 @@ spec:
               value: "order-service"
             - name: SERVICE_PORT
               value: "8002"
+            # Points at the Envoy sidecar below, not payment-service directly.
+            # Same Pod = same network namespace, so localhost reaches it.
+            - name: PAYMENT_SERVICE_URL
+              value: "http://localhost:10000"
           livenessProbe:
             httpGet:
               path: /health
@@ -48,3 +52,26 @@ spec:
             limits:
               memory: "128Mi"
               cpu: "200m"
+        - name: envoy-sidecar
+          image: envoyproxy/envoy:v1.31-latest
+          ports:
+            - name: envoy-proxy
+              containerPort: 10000
+              protocol: TCP
+            - name: envoy-admin
+              containerPort: 9901
+              protocol: TCP
+          volumeMounts:
+            - name: envoy-config
+              mountPath: /etc/envoy
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "100m"
+      volumes:
+        - name: envoy-config
+          configMap:
+            name: envoy-sidecar-config

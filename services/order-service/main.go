@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -15,16 +17,93 @@ import (
 const port = 8002
 const serviceName = "order-service"
 
+var paymentServiceURL = getEnv("PAYMENT_SERVICE_URL", "http://payment-service:8003")
+
+func getEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
 type HealthResponse struct {
 	Status  string `json:"status"`
 	Service string `json:"service"`
 }
 
 type OrderResponse struct {
-	ID        string `json:"id"`
-	UserID    string `json:"user_id"`
-	Total     float64 `json:"total"`
-	Status    string `json:"status"`
+	ID            string  `json:"id"`
+	UserID        string  `json:"user_id"`
+	Total         float64 `json:"total"`
+	Status        string  `json:"status"`
+	PaymentStatus string  `json:"payment_status"`
+	TransactionID string  `json:"transaction_id,omitempty"`
+}
+
+type paymentRequest struct {
+	OrderID string  `json:"order_id"`
+	Amount  float64 `json:"amount"`
+}
+
+type paymentResponse struct {
+	TransactionID string  `json:"transaction_id"`
+	OrderID       string  `json:"order_id"`
+	Amount        float64 `json:"amount"`
+	Status        string  `json:"status"`
+}
+
+// chargePayment calls payment-service (through the Envoy sidecar when
+// PAYMENT_SERVICE_URL points at localhost) to charge for this order.
+// simulateDelaySeconds, when non-empty, is forwarded as a query param so
+// payment-service artificially sleeps -- used to demonstrate Envoy's route
+// timeout from the Experiment section of this milestone.
+func chargePayment(orderID, simulateDelaySeconds string) (transactionID, status string) {
+	body, _ := json.Marshal(paymentRequest{OrderID: orderID, Amount: 99.99})
+
+	url := paymentServiceURL + "/payments"
+	if simulateDelaySeconds != "" {
+		url += "?delay=" + simulateDelaySeconds
+	}
+
+	// Intentionally longer than Envoy's configured route timeout (2s), so
+	// when a timeout happens it's Envoy's timeout firing, not this client's.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("[%s] payment request build error: %v\n", serviceName, err)
+		return "", "unavailable"
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		if strings.Contains(err.Error(), "context deadline exceeded") {
+			log.Printf("[%s] payment call timed out: %v\n", serviceName, err)
+			return "", "timeout"
+		}
+		log.Printf("[%s] payment call failed: %v\n", serviceName, err)
+		return "", "unavailable"
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusGatewayTimeout {
+		log.Printf("[%s] Envoy sidecar reported a route timeout (504)\n", serviceName)
+		return "", "timeout"
+	}
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[%s] payment call returned status %d\n", serviceName, resp.StatusCode)
+		return "", "unavailable"
+	}
+
+	var pr paymentResponse
+	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
+		log.Printf("[%s] payment response decode error: %v\n", serviceName, err)
+		return "", "unavailable"
+	}
+
+	return pr.TransactionID, "completed"
 }
 
 func logRequest(method, path string, status int, duration time.Duration) {
@@ -67,13 +146,17 @@ func ordersHandler(w http.ResponseWriter, r *http.Request) {
 	// Extract order ID from path (e.g., /orders/123)
 	orderID := r.URL.Path[len("/orders/"):]
 
+	transactionID, paymentStatus := chargePayment(orderID, r.URL.Query().Get("simulate_delay"))
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(OrderResponse{
-		ID:        orderID,
-		UserID:    "user-123",
-		Total:     99.99,
-		Status:    "completed",
+		ID:            orderID,
+		UserID:        "user-123",
+		Total:         99.99,
+		Status:        "completed",
+		PaymentStatus: paymentStatus,
+		TransactionID: transactionID,
 	})
 	logRequest(r.Method, r.URL.Path, http.StatusOK, time.Since(start))
 }
